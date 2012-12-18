@@ -1,8 +1,9 @@
-VERSION = 0.1.4
+VERSION = 0.1.6.8
 DISTNAME = replex-$(VERSION)
 TARNAME = $(DISTNAME).tar.gz	
 INCS   = -I..
-CFLAGS =  -g -Wall -O2 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
+CFLAGS =  -g -m32 -Wall -O6 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE -DVERSION=\"$(VERSION)\"
+LDFLAGS = -m32
 LIBS   = -L. 
 MFLAG  = -M
 OBJS = element.o pes.o mpg_common.o ts.o ringbuffer.o avi.o multiplex.o
@@ -26,7 +27,7 @@ libreplex.a: $(OBJS)
 	ar -rcs libreplex.a $(OBJS) 
 
 replex: libreplex.a replex.o
-	$(CC) -o replex replex.o -L. -lreplex
+	$(CC) $(LDFLAGS) -o replex replex.o -L. -lreplex
 
 dist: $(SRC) $(HEADERS) Makefile
 	mkdir $(DISTNAME)

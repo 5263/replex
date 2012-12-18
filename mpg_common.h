@@ -2,8 +2,10 @@
  * mpg_common.h
  *        
  *
- * Copyright (C) 2003 Marcus Metzler <mocm@metzlerbros.de>
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
  *                    Metzler Brothers Systementwicklung GbR
+ *           (C) 2006 Reel Multimedia
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -48,11 +50,15 @@ typedef struct index_unit_s{
 	uint8_t  frame_start;
 	uint8_t  err;
 	int      framesize;
+	uint8_t  *fillframe;
 } index_unit;
 
 #define NO_ERR    0
 #define FRAME_ERR 1
-
+#define PTS_ERR 2
+#define JUMP_ERR 3
+#define DUMMY_ERR 4
+#define DROP_ERR 5
 
 void show_buf(uint8_t *buf, int length);
 int find_mpg_header(uint8_t head, uint8_t *buf, int length);

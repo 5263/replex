@@ -2,8 +2,10 @@
  * ringbuffer.c
  *        
  *
- * Copyright (C) 2003 Marcus Metzler <mocm@metzlerbros.de>
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
  *                    Metzler Brothers Systementwicklung GbR
+ *           (C) 2006 Reel Multimedia
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,6 +32,7 @@
 #include "pes.h"
 
 #define DEBUG 1
+// Initialize buffer
 int ring_init (ringbuffer *rbuf, int size)
 {
 	if (size > 0){
@@ -47,6 +50,7 @@ int ring_init (ringbuffer *rbuf, int size)
 	return 0;
 }
 
+// reset buffer
 void ring_clear(ringbuffer *rbuf)
 {
 	rbuf->read_pos = 0;	
@@ -54,13 +58,14 @@ void ring_clear(ringbuffer *rbuf)
 }
 
 
-
+// delete buffer
 void ring_destroy(ringbuffer *rbuf)
 {
 	free(rbuf->buffer);
 }
 
 
+//write into buffer
 int ring_write(ringbuffer *rbuf, uint8_t *data, int count)
 {
 
@@ -72,9 +77,13 @@ int ring_write(ringbuffer *rbuf, uint8_t *data, int count)
 	free = ring_free(rbuf);
 
 	if ( free < count ){
-		if (DEBUG) fprintf(stderr,"ringbuffer overflow %d<%d %d\n", 
-				   free, count, rbuf->size);
-		return FULL_BUFFER;
+		if ( free > 0 ){
+			count = free;
+		} else {
+			if (DEBUG) fprintf(stderr,"ringbuffer overflow %d<%d %d\n", 
+					   free, count, rbuf->size);
+			return FULL_BUFFER;
+		}
 	}
 	
 	if (count >= rest){
@@ -92,6 +101,7 @@ int ring_write(ringbuffer *rbuf, uint8_t *data, int count)
 	return count;
 }
 
+// peek into buffer
 int ring_peek(ringbuffer *rbuf, uint8_t *data, int count, long off)
 {
 
@@ -120,6 +130,8 @@ int ring_peek(ringbuffer *rbuf, uint8_t *data, int count, long off)
 	return count;
 }
 
+
+//read from buffer
 int ring_read(ringbuffer *rbuf, uint8_t *data, int count)
 {
 
@@ -151,6 +163,7 @@ int ring_read(ringbuffer *rbuf, uint8_t *data, int count)
 	return count;
 }
 
+//skip buffer
 int ring_skip(ringbuffer *rbuf, int count)
 {
 
@@ -178,7 +191,7 @@ int ring_skip(ringbuffer *rbuf, int count)
 }
 
 
-
+// write from file into buffer
 int ring_write_file(ringbuffer *rbuf, int fd, int count)
 {
 
@@ -189,11 +202,13 @@ int ring_write_file(ringbuffer *rbuf, int fd, int count)
 	rest = rbuf->size - pos;
 	free = ring_free(rbuf);
 
-	if ( free < count ){
+	if ( !free ){
 		if (DEBUG) fprintf(stderr,"ringbuffer overflow %d<%d %d %d\n", 
 				   free, count, pos, rbuf->read_pos);
 		return FULL_BUFFER;
 	}
+
+	if ( count > free ) count = free;
 	
 	if (count >= rest){
 		rr = read (fd, rbuf->buffer+pos, rest);
@@ -214,6 +229,7 @@ int ring_write_file(ringbuffer *rbuf, int fd, int count)
 
 
 
+// write from buffer into file
 int ring_read_file(ringbuffer *rbuf, int fd, int count)
 {
 
@@ -248,7 +264,7 @@ int ring_read_file(ringbuffer *rbuf, int fd, int count)
 	return rr;
 }
 
-
+// print memory 
 static void show(uint8_t *buf, int length)
 {
 	int i,j,r;
@@ -332,9 +348,9 @@ int dummy_add(dummy_buffer *dbuf, uint64_t time, uint32_t size)
 	if (dummy_space(dbuf) < size) return -1;
 //	fprintf(stderr,"add %d ",dummy_space(dbuf));    
 	dbuf->fill += size;
-	if (ring_write(&dbuf->time_index, (char *)&time, sizeof(uint64_t)) < 0) 
+	if (ring_write(&dbuf->time_index, (uint8_t *)&time, sizeof(uint64_t)) < 0) 
 		return -2;
-	if (ring_write(&dbuf->data_index, (char *)&size, sizeof(uint32_t)) < 0) 
+	if (ring_write(&dbuf->data_index, (uint8_t *)&size, sizeof(uint32_t)) < 0) 
 		return -3;
 //	fprintf(stderr," - %d = ",size);    
 //	fprintf(stderr,"%d\n",dummy_space(dbuf));    
@@ -349,15 +365,15 @@ int dummy_delete(dummy_buffer *dbuf, uint64_t time)
 	uint32_t dsize=0;
 
 	do {
-		if (ring_peek(&dbuf->time_index,(char *) &rtime, 
+		if (ring_peek(&dbuf->time_index,(uint8_t *) &rtime, 
 			      sizeof(uint64_t), 0)<0){
 			if (dsize) break;
 			else return -1;
 		}
 		if (ptscmp(rtime,time) < 0){
-			ring_read(&dbuf->time_index,(char *) &rtime, 
+			ring_read(&dbuf->time_index,(uint8_t *) &rtime, 
 				  sizeof(uint64_t));
-			ring_read(&dbuf->data_index,(char *) &size, 
+			ring_read(&dbuf->data_index,(uint8_t *) &size, 
 				  sizeof(uint32_t));
 			dsize += size;
 		} else ex = 1;

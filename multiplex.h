@@ -2,8 +2,10 @@
  * multiplex.h
  *        
  *
- * Copyright (C) 2003 Marcus Metzler <mocm@metzlerbros.de>
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
  *                    Metzler Brothers Systementwicklung GbR
+ *           (C) 2006 Reel Multimedia
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -65,6 +67,7 @@ typedef struct multiplex_s{
 	uint64_t first_vpts;
 	uint64_t first_apts[N_AUDIO];
 	uint64_t first_ac3pts[N_AC3];
+	
 	uint64_t SCR;
 	uint64_t oldSCR;
 	uint64_t SCRinc;
@@ -77,6 +80,10 @@ typedef struct multiplex_s{
 	uint64_t apts_off[N_AUDIO];
 	int aframes[N_AUDIO];
 	int ac3frames[N_AUDIO];
+	int total_written;
+	int zero_write_count;
+	int max_write;
+	int max_reached;
 
 /* needed from replex */
 	int apidn;

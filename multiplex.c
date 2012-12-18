@@ -1,8 +1,55 @@
+/*
+ * multiplex.c: multiplex functions for replex
+ *        
+ *
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
+ *                    Metzler Brothers Systementwicklung GbR
+ *           (C) 2006 Reel Multimedia
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * General Public License for more details.
+ *
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
+ *
+ */
+
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "multiplex.h"
+
+
+static int mplx_write(multiplex_t *mx, uint8_t *buffer,int length)
+{
+	int k=0;
+
+	if ( mx->max_write && mx->total_written+ length >  
+	     mx-> max_write && !mx->max_reached){
+		mx->max_reached = 1;
+		fprintf(stderr,"Maximum file size %dKB reached\n", mx->max_write/1024);
+		return 0;
+	}
+	if ((k=write(mx->fd_out, buffer, length)) <= 0){
+		mx->zero_write_count++;
+	} else {
+		mx->total_written += k;
+	}
+	return k;
+}
 
 static int buffers_filled(multiplex_t *mx)
 {
@@ -116,7 +163,6 @@ static int get_next_ac3_unit(multiplex_t *mx, index_unit *aiu, int i)
 		}
 	
 	ring_read(&mx->index_ac3rbuffer[i], (uint8_t *)aiu, sizeof(index_unit));
-	
 	return 1;
 }
 
@@ -138,7 +184,7 @@ static void writeout_video(multiplex_t *mx)
 		if (!mx->startup && mx->navpack){
 			write_nav_pack(mx->pack_size, mx->apidn, mx->ac3n, 
 				       mx->SCR, mx->muxr, outbuf);
-			write(mx->fd_out, outbuf, mx->pack_size);
+			mplx_write(mx, outbuf, mx->pack_size);
 			ptsinc(&mx->SCR, mx->SCRinc);
 		} else mx->startup = 0;
 #ifdef OUT_DEBUG
@@ -217,7 +263,7 @@ static void writeout_video(multiplex_t *mx)
 		pts2time( viu->pts + mx->video_delay, outbuf, written);
 	}
 
-	write(mx->fd_out, outbuf, written);
+	mplx_write(mx, outbuf, written);
 	
 	if (viu->length == 0){
 		get_next_video_unit(mx, viu);
@@ -225,13 +271,90 @@ static void writeout_video(multiplex_t *mx)
 
 }
 
+
+#define INSIZE 6000
+int add_to_inbuf(uint8_t *inbuf,ringbuffer *arbuffer, int inbc, int off, int length)
+{  
+	int add;
+	
+	if (inbc + length > INSIZE) {
+		fprintf(stderr,"buffer too small in write_out_audio %d %d\n",inbc,length);
+		return 0;
+	}
+	add= ring_peek( arbuffer, inbuf+inbc, length, off);
+	if (add < length) {
+		fprintf(stderr,"error while peeking audio ring %d (%d)\n", add,length);
+		return 0;
+	}
+	return add;
+}
+
+
+static void clear_audio(multiplex_t *mx, int type, int n)
+{
+	index_unit *aiu;
+	int g=0;
+	ringbuffer *arbuffer;
+
+	switch (type){
+		
+	case MPEG_AUDIO:
+#ifdef OUT_DEBUG
+		fprintf(stderr,"clear AUDIO%d pack\n",n);
+#endif
+		arbuffer = &mx->arbuffer[n];
+		aiu = &mx->aiu[n];
+		break;
+
+	case AC3:
+#ifdef OUT_DEBUG
+		fprintf(stderr,"clear AC3%d pack\n",n);
+#endif
+		arbuffer = &mx->ac3rbuffer[n];
+		aiu = &mx->ac3iu[n];
+		break;
+
+	default:
+		return;
+	}
+	while (aiu->err == JUMP_ERR){
+//		fprintf(stderr,"FOUND ONE\n");
+		ring_skip(arbuffer, aiu->length);		
+		if (type == MPEG_AUDIO)
+			g = get_next_audio_unit(mx, aiu, n);
+		else
+			g = get_next_ac3_unit(mx, aiu, n);		
+	}
+
+}
+
+
+
+static void my_memcpy(uint8_t *target, int offset, uint8_t *source, int length, int maxlength)
+{
+	uint8_t *targ = NULL;
+
+	targ = target + offset;
+	
+	if ( offset+length > maxlength){
+		fprintf(stderr,"WARNING: buffer overflow in my_memcopy \n");
+//		fprintf(stderr, "source 0x%x  offset %d target 0x%x  length %d maxlength %d\n"
+//			, source, offset, target, length, maxlength);
+	}
+	memcpy(targ, source, length);
+}
+
+
 static void writeout_audio(multiplex_t *mx, int type, int n)
 {  
 	uint8_t outbuf[3000];
+	uint8_t inbuf[INSIZE];
+	int inbc=0;
 	int written=0;
 	int length=0;
 	dummy_buffer *dbuf;
 	ringbuffer *airbuffer;
+	ringbuffer *arbuffer;
 	int nlength=0;
 	uint64_t pts, dpts=0;
 	uint64_t adelay;
@@ -242,6 +365,10 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 	int rest_data = 5;
 	uint64_t *apts;
 	index_unit *aiu;
+	int g=0;
+	int add, off=0;
+	int fakelength = 0;
+	int droplength = 0;
 
 	switch (type){
 
@@ -250,6 +377,7 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 		fprintf(stderr,"writing AUDIO%d pack\n",n);
 #endif
 		airbuffer = &mx->index_arbuffer[n];
+		arbuffer = &mx->arbuffer[n];
 		dbuf = &mx->adbuf[n];
 		adelay = mx->apts_off[n];
 		aframesize = mx->aframes[n];	
@@ -262,6 +390,7 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 		fprintf(stderr,"writing AC3%d pack\n",n);
 #endif
 		airbuffer = &mx->index_ac3rbuffer[n];
+		arbuffer = &mx->ac3rbuffer[n];
 		dbuf = &mx->ac3dbuf[n];
 		adelay = mx->ac3pts_off[n];
 		aframesize = mx->ac3frames[n];	
@@ -281,10 +410,38 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 	pts = uptsdiff( aiu->pts + mx->audio_delay, adelay );
 	*apts = pts;
 	length = aiu->length;
-	if (length < aiu->framesize){
+
+	if (length <  aiu->framesize){
 		newpts = 1;
 		ac3_off = length;
+		nframes = 0;
+	} 
+
+	switch (aiu->err){
+		
+	case NO_ERR:
+		add = add_to_inbuf(inbuf, arbuffer, inbc, off, aiu->length);
+		off += add;
+		inbc += add;
+		break;
+	case PTS_ERR:
+		break;
+	case FRAME_ERR:
+	case JUMP_ERR: 
+		break;
+	case DUMMY_ERR:
+	  if (aiu->fillframe){
+//		  fprintf(stderr,"1. memcopy 0x%x\n",aiu->fillframe);
+			my_memcpy(inbuf, inbc
+			       , aiu->fillframe + aframesize - length
+				  , length, INSIZE);
+			inbc += length;
+			fakelength += length;
+		} else fprintf(stderr,"no fillframe \n");
+		
+		break;
 	}
+
 	dummy_add(dbuf, pts, aiu->length);
 
 #ifdef OUT_DEBUG
@@ -299,20 +456,52 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 	fprintf(stderr,"\n");
 #endif
 	while (length  < mx->data_size + rest_data){
-		if (ring_read(airbuffer, (char *)aiu, sizeof(index_unit)) > 0){
+		if (ring_read(airbuffer, (uint8_t *)aiu, sizeof(index_unit)) > 0){
+			
 			dpts = uptsdiff(aiu->pts +mx->audio_delay, adelay );
 			
 			if (newpts){
 				pts = dpts;
 				newpts=0;
 			}
+			
+			
+			switch(aiu->err)
+			{
+			case NO_ERR:
+				length += aiu->length;
+				add = add_to_inbuf(inbuf, arbuffer, inbc, off, aiu->length);
+				inbc += add;
+				off += add;
+				nframes++;
+				break;
 
-			length+= aiu->length;
+			case PTS_ERR:
+				break;
+			case FRAME_ERR:
+			case JUMP_ERR:
+				droplength += aiu->length;
+ 				off += aiu->length;
+				break;
+			case DUMMY_ERR:
+				length += aframesize;
+				if (aiu->fillframe){
+//					fprintf(stderr,"2. memcopy 0x%x\n",aiu->fillframe);
+					my_memcpy(inbuf, inbc, aiu->fillframe, aframesize, INSIZE);
+					inbc += aframesize;
+					fakelength += aframesize;
+					nframes++;
+				} else fprintf(stderr,"no fillframe \n");
+				
+				break;
+			} 
+
 			if (length < mx->data_size + rest_data)
 				dummy_add(dbuf, dpts, aiu->length);
 			
 			*apts = dpts;
-			nframes++;
+
+
 #ifdef OUT_DEBUG
 			fprintf(stderr,"start: %d  stop: %d (%d)  length %d ", 
 				aiu->start, (aiu->start+aiu->length),
@@ -330,38 +519,57 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 			exit(1);
 		}
 	}
-
 	nlength = length;
 
+/*
 	if (type == MPEG_AUDIO)
 		written = write_audio_pes( mx->pack_size, mx->apidn, mx->ac3n
 					   , n, pts, mx->SCR, mx->muxr, 
 					   outbuf, &nlength, PTS_ONLY,
-					   &mx->arbuffer[n]);
+					   arbuffer);
 	else 
 		written = write_ac3_pes( mx->pack_size, mx->apidn, mx->ac3n
 					 , n, pts, mx->SCR, mx->muxr, 
 					 outbuf, &nlength, PTS_ONLY,
 					 nframes, ac3_off,
-					 &mx->ac3rbuffer[n]);
-		
+					 arbuffer, aiu->length);
+*/
+
+	if (type == MPEG_AUDIO)
+		written = bwrite_audio_pes( mx->pack_size, mx->apidn, mx->ac3n
+					   , n, pts, mx->SCR, mx->muxr, 
+					   outbuf, &nlength, PTS_ONLY,
+					   inbuf, inbc);
+	else 
+		written = bwrite_ac3_pes( mx->pack_size, mx->apidn, mx->ac3n
+					 , n, pts, mx->SCR, mx->muxr, 
+					 outbuf, &nlength, PTS_ONLY,
+					 nframes, ac3_off,
+					 inbuf, inbc , aiu->length);
 	
+	if (aiu->err == DUMMY_ERR){
+		fakelength -= length-nlength;
+	}
 	length -= nlength;
-	write(mx->fd_out, outbuf, written);
-	
+	mplx_write(mx, outbuf, written);
+	if (nlength-fakelength+droplength){
+		ring_skip(arbuffer, nlength-fakelength+droplength);
+	}
 	dummy_add(dbuf, dpts, aiu->length-length);
 	aiu->length = length;
-	aiu->start = ring_rpos(&mx->arbuffer[n]);
+	aiu->start = ring_rpos(arbuffer);
 
 	if (aiu->length == 0){
 		if (type == MPEG_AUDIO)
-			get_next_audio_unit(mx, aiu, n);
+			g = get_next_audio_unit(mx, aiu, n);
 		else
-			get_next_ac3_unit(mx, aiu, n);
+			g = get_next_ac3_unit(mx, aiu, n);
 	}
+
+
 	*apts = uptsdiff(aiu->pts + mx->audio_delay, adelay);
 #ifdef OUT_DEBUG
-	if ((int64_t)*apts < 0) fprintf(stderr,"SCHEISS ");
+	if ((int64_t)*apts < 0) fprintf(stderr,"MIST ");
 	fprintf(stderr,"APTS");
 	printpts(*apts);
 	printpts(aiu->pts);
@@ -369,6 +577,16 @@ static void writeout_audio(multiplex_t *mx, int type, int n)
 	printpts(adelay);
 	fprintf(stderr,"\n");
 #endif
+	int lc=0;
+	while (aiu->err == JUMP_ERR && lc < 100){
+		lc++;
+		
+		ring_skip(arbuffer, aiu->length);		
+		if (type == MPEG_AUDIO)
+			g = get_next_audio_unit(mx, aiu, n);
+		else
+			g = get_next_ac3_unit(mx, aiu, n);		
+	}
 
 	if (mx->fill_buffers(mx->priv, mx->finish)< 0) {
 		fprintf(stderr,"error in writeout audio\n");
@@ -383,7 +601,7 @@ static void writeout_padding (multiplex_t *mx)
 
 	write_padding_pes( mx->pack_size, mx->apidn, mx->ac3n, mx->SCR, 
 			   mx->muxr, outbuf);
-	write(mx->fd_out, outbuf, mx->pack_size);
+	mplx_write(mx, outbuf, mx->pack_size);
 }
 
 void check_times( multiplex_t *mx, int *video_ok, int *audio_ok, int *ac3_ok,
@@ -453,14 +671,19 @@ void check_times( multiplex_t *mx, int *video_ok, int *audio_ok, int *ac3_ok,
 				mx->extra_clock = 0.0;
 		}
 	}
-	
+
+
 	/* clear decoder buffers up to SCR */
 	dummy_delete(&mx->vdbuf, mx->SCR);    
 	
-	for (i=0;i <mx->apidn; i++)
+	for (i=0;i <mx->apidn; i++){
 		dummy_delete(&mx->adbuf[i], mx->SCR);
-	for (i=0;i <mx->ac3n; i++)
+		clear_audio(mx, MPEG_AUDIO, i);
+	}
+	for (i=0;i <mx->ac3n; i++) {
 		dummy_delete(&mx->ac3dbuf[i], mx->SCR);
+		clear_audio(mx, AC3, i);
+	}
 	
 	
 	if (dummy_space(&mx->vdbuf) > mx->vsize && mx->viu.length > 0 &&
@@ -497,25 +720,26 @@ void write_out_packs( multiplex_t *mx, int video_ok,
 		writeout_video(mx);  
 	} else { // second case(s): audio ok, video in time
 		int done=0;
-		for ( i = 0; i < mx->apidn; i++){
+		for ( i = 0; i < mx->ac3n; i++){
+			if ( ac3_ok[i] && !rest_audio_ok(i,ac3_ok, mx->ac3n)			    
+			     && !all_audio_ok(audio_ok, mx->apidn)){
+
+				writeout_audio(mx, AC3, i);
+				done = 1;
+				break;
+			}
+		}
+
+		for ( i = 0; i < mx->apidn && !done; i++){
 			if ( audio_ok[i] && !rest_audio_ok(i, audio_ok, 
-							   mx->apidn)
-			     && !all_audio_ok(ac3_ok, mx->ac3n)){
+							   mx->apidn)){
 				writeout_audio(mx, MPEG_AUDIO, i);
 				done = 1;
 				break;
 			}
 		}
-		for ( i = 0; i < mx->ac3n && !done; i++){
-			if ( !done && ac3_ok[i] && 
-			     !all_audio_ok( audio_ok, mx->apidn)
-			     && !rest_audio_ok(i,ac3_ok, mx->ac3n)){
-				writeout_audio(mx, AC3, i);
-				
-				done = 1;
-				break;
-			}
-		}
+
+
 		if (!done && !mx->VBR){
 			writeout_padding(mx);
 		}
@@ -581,7 +805,7 @@ void finish_mpg(multiplex_t *mx)
                         
                           
 	if (mx->otype == REPLEX_MPEG2)
-		write(mx->fd_out, mpeg_end,4);
+		mplx_write(mx, mpeg_end,4);
 }
 
 
@@ -602,6 +826,10 @@ void init_multiplex( multiplex_t *mx, sequence_t *seq_head, audio_frame_t *afram
 	mx->audio_delay = audio_delay;
 	mx->fd_out = fd;
 	mx->otype = otype;
+	mx->total_written = 0;
+	mx->zero_write_count = 0;
+	mx->max_write = 0;
+	mx->max_reached = 0;
 
 	switch(mx->otype){
 
@@ -618,6 +846,7 @@ void init_multiplex( multiplex_t *mx, sequence_t *seq_head, audio_frame_t *afram
 		mx->reset_clocks = 0;
 		mx->write_end_codes = 0;
 		mx->set_broken_link = 0;
+		//		mx->max_write = 1024*1024*1024; // 1GB max VOB length
 		break;
 
 
@@ -725,7 +954,7 @@ void setup_multiplex(multiplex_t *mx)
 		uint8_t outbuf[2048];
 		write_nav_pack(mx->pack_size, mx->apidn, mx->ac3n, 
 			       mx->SCR, mx->muxr, outbuf);
-		write(mx->fd_out, outbuf, mx->pack_size);
+		mplx_write(mx, outbuf, mx->pack_size);
 		ptsinc(&mx->SCR, mx->SCRinc);
 		mx->startup = 1;
 	} else mx->startup = 0;

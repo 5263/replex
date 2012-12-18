@@ -2,8 +2,10 @@
  * pes.c: MPEG PES functions for replex
  *        
  *
- * Copyright (C) 2003 Marcus Metzler <mocm@metzlerbros.de>
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
  *                    Metzler Brothers Systementwicklung GbR
+ *           (C) 2006 Reel Multimedia
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,6 +32,8 @@
 #include <string.h>
 
 #include "pes.h"
+
+//#define PES_DEBUG
 
 void printpts(int64_t pts)
 {
@@ -155,12 +159,11 @@ void init_pes_in(pes_in_t *p, int t, ringbuffer *rb, int wi){
 void get_pes (pes_in_t *p, uint8_t *buf, int count, void (*func)(pes_in_t *p))
 {
 
-	int l;
-	unsigned short *pl;
+	int l=0;
+	unsigned short *pl=NULL;
 	int c=0;
 
 	uint8_t headr[3] = { 0x00, 0x00, 0x01} ;
-
 	while (c < count && (!p->mpeg ||
 			     (p->mpeg == 2 && p->found < 9))
 	       &&  (p->found < 5 || !p->done)){
@@ -238,9 +241,8 @@ void get_pes (pes_in_t *p, uint8_t *buf, int count, void (*func)(pes_in_t *p))
 				p->found++;
 				if ( (p->flag1 & 0xC0) == 0x80 ) p->mpeg = 2;
 				else {
-					fprintf(stderr, 
-						"Error: THIS IS AN MPEG1 FILE\n");
-					exit(1);
+					fprintf(stderr, "Error in PES Header 0x%2x\n",p->cid);
+					p->found = 0;
 				}
 			}
 			break;
@@ -264,6 +266,10 @@ void get_pes (pes_in_t *p, uint8_t *buf, int count, void (*func)(pes_in_t *p))
 		default:
 
 			break;
+		}
+		if(p->plength && p->found == 9 && p->found > p->plength+6){
+			fprintf(stderr, "Error in PES Header 0x%2x\n",p->cid);
+			p->found = 0;
 		}
 	}
 
@@ -338,12 +344,15 @@ void get_pes (pes_in_t *p, uint8_t *buf, int count, void (*func)(pes_in_t *p))
 						memcpy(p->hbuf+p->found, buf+c, rest);
 						if (ring_write(p->rbuf, buf+c+rest, 
 							       l-rest) <0){
+							fprintf(stderr,
+								"ring buffer overflow in get_pes %d\n"
+								,p->rbuf->size);
 							exit(1);
 						}
 					} else {
 						if (ring_write(p->rbuf, buf+c, l)<0){
 							fprintf(stderr,
-								"ring buffer overflow %d\n"
+								"ring buffer overflow in get_pes %d\n"
 								,p->rbuf->size);
 							exit(1);
 						}
@@ -544,7 +553,6 @@ int write_ps_header(uint8_t *buf,
 		p.rate_bound[1] = (uint8_t)(0xff & (muxr >> 7));
 		p.rate_bound[2] = (uint8_t)(0x01 | ((muxr & 0x7f)<<1));
 
-	
 		p.audio_bound = (uint8_t)((audio_bound << 2)|(fixed << 1)|CSPS);
 		p.video_bound = (uint8_t)((audio_lock << 7)|
 				     (video_lock << 6)|0x20|video_bound);
@@ -687,6 +695,11 @@ int write_video_pes( int pack_size, int apidn, int ac3n, uint64_t vpts,
 	int stuff = 0;
 	int length = *vlength;
 
+#ifdef PES_DEBUG
+	fprintf(stderr,"write video PES ");
+	printpts(vdts);
+	fprintf(stderr,"\n");
+#endif
 	if (! length) return 0;
 	p = PS_HEADER_L1+PES_H_MIN;
 
@@ -739,6 +752,12 @@ int write_audio_pes(  int pack_size, int apidn, int ac3n, int n, uint64_t pts,
 	int stuff = 0;
 	int length = *alength;
 
+#ifdef PES_DEBUG
+	fprintf(stderr,"write audio PES ");
+	printpts(pts);
+	fprintf(stderr,"\n");
+#endif
+
 	if (!length) return 0;
 	p = PS_HEADER_L1+PES_H_MIN;
 
@@ -782,13 +801,82 @@ int write_audio_pes(  int pack_size, int apidn, int ac3n, int n, uint64_t pts,
 int write_ac3_pes(  int pack_size, int apidn, int ac3n, int n,
 		    uint64_t pts, uint64_t SCR, 
 		    uint32_t muxr, uint8_t *buf, int *alength, uint8_t ptsdts,
-		    int nframes,int ac3_off, ringbuffer *ac3rbuffer)
+		    int nframes,int ac3_off, ringbuffer *ac3rbuffer, int framelength)
 {
 	int add;
 	int pos = 0;
 	int p   = 0;
 	int stuff = 0;
 	int length = *alength;
+
+#ifdef PES_DEBUG
+	fprintf(stderr,"write ac3 PES ");
+	printpts(pts);
+	fprintf(stderr,"\n");
+#endif
+
+	if (!length) return 0;
+	p = PS_HEADER_L1+PES_H_MIN;
+
+	if (ptsdts == PTS_ONLY){
+		p += 5;
+	}
+
+	if ( length+p >= pack_size){
+		if (length+p -pack_size == framelength-4) nframes--;
+		length = pack_size;
+	} else {
+		if (pack_size-length-p <= PES_MIN){
+			stuff = pack_size - length-p;
+			length = pack_size;
+		} else 
+			length = length+p;
+	}
+	pos = write_ps_header(buf,SCR,muxr, apidn+ac3n, 0, 0, 1, 1, 
+			      1, 0);
+
+	pos += write_pes_header( PRIVATE_STREAM1, length-pos, pts, 0, 
+				 buf+pos, stuff, ptsdts);
+	buf[pos] = 0x80 + n +apidn;
+	buf[pos+1] = nframes;
+	buf[pos+2] = (ac3_off >> 8)& 0xFF;
+	buf[pos+3] = (ac3_off)& 0xFF;
+	pos += 4;
+
+	add = ring_read( ac3rbuffer, buf+pos, length-pos);
+	*alength = add;
+	if (add < 0) return -1;
+	pos += add;
+
+	if (pos+PES_MIN < pack_size){
+		pos += write_pes_header( PADDING_STREAM, pack_size-pos, 0,0,
+					 buf+pos, 0, 0);
+		pos = pack_size;
+	}		
+	if (pos != pack_size) {
+		fprintf(stderr,"apos: %d\n",pos);
+		exit(1);
+	}
+
+	return pos;
+}
+
+
+int bwrite_audio_pes(  int pack_size, int apidn, int ac3n, int n, uint64_t pts, 
+		      uint64_t SCR, uint32_t muxr, uint8_t *buf, int *alength, 
+		       uint8_t ptsdts, uint8_t *arbuffer, int bsize )
+{
+	int add;
+	int pos = 0;
+	int p   = 0;
+	int stuff = 0;
+	int length = *alength;
+
+#ifdef PES_DEBUG
+	fprintf(stderr,"write audio PES ");
+	printpts(pts);
+	fprintf(stderr,"\n");
+#endif
 
 	if (!length) return 0;
 	p = PS_HEADER_L1+PES_H_MIN;
@@ -806,20 +894,83 @@ int write_ac3_pes(  int pack_size, int apidn, int ac3n, int n,
 		} else 
 			length = length+p;
 	}
+	pos = write_ps_header(buf,SCR,muxr, apidn + ac3n, 0, 0, 1, 1, 
+			      1, 0);
+	pos += write_pes_header( 0xC0+n, length-pos, pts, 0, buf+pos, stuff, 
+				 ptsdts);
+
+	if (length -pos < bsize){
+		memcpy(buf+pos, arbuffer, length-pos);
+		add = length - pos;
+		*alength = add;
+	} else  return -1;
+	
+	pos += add;
+
+	if (pos+PES_MIN < pack_size){
+		pos += write_pes_header( PADDING_STREAM, pack_size-pos, 0,0,
+					 buf+pos, 0, 0);
+		pos = pack_size;
+	}		
+	if (pos != pack_size) {
+		fprintf(stderr,"apos: %d\n",pos);
+		exit(1);
+	}
+
+	return pos;
+}
+
+
+
+int bwrite_ac3_pes(  int pack_size, int apidn, int ac3n, int n,
+		    uint64_t pts, uint64_t SCR, 
+		    uint32_t muxr, uint8_t *buf, int *alength, uint8_t ptsdts,
+		     int nframes,int ac3_off, uint8_t *ac3rbuffer, int bsize, int framelength)
+{
+	int add;
+	int pos = 0;
+	int p   = 0;
+	int stuff = 0;
+	int length = *alength;
+
+#ifdef PES_DEBUG
+	fprintf(stderr,"write ac3 PES ");
+	printpts(pts);
+	fprintf(stderr,"\n");
+#endif
+	if (!length) return 0;
+	p = PS_HEADER_L1+PES_H_MIN;
+
+	if (ptsdts == PTS_ONLY){
+		p += 5;
+	}
+
+	if ( length+p >= pack_size){
+		if (length+p -pack_size == framelength-4) nframes--;
+		length = pack_size;
+	} else {
+		if (pack_size-length-p <= PES_MIN){
+			stuff = pack_size - length-p;
+			length = pack_size;
+		} else 
+			length = length+p;
+	}
 	pos = write_ps_header(buf,SCR,muxr, apidn+ac3n, 0, 0, 1, 1, 
 			      1, 0);
 
 	pos += write_pes_header( PRIVATE_STREAM1, length-pos, pts, 0, 
 				 buf+pos, stuff, ptsdts);
-	buf[pos] = 0x80 + n;
+	buf[pos] = 0x80 + n +apidn;
 	buf[pos+1] = nframes;
 	buf[pos+2] = (ac3_off >> 8)& 0xFF;
 	buf[pos+3] = (ac3_off)& 0xFF;
 	pos += 4;
 
-	add = ring_read( ac3rbuffer, buf+pos, length-pos);
-	*alength = add;
-	if (add < 0) return -1;
+	if (length-pos <= bsize){
+		memcpy(buf+pos, ac3rbuffer, length-pos);
+		add = length-pos;
+		*alength = add;
+	} else return -1;
 	pos += add;
 
 	if (pos+PES_MIN < pack_size){

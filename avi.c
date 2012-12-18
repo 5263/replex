@@ -2,7 +2,8 @@
  * avi.c: AVI container functions for replex
  *        
  *
- * Copyright (C) 2003 Marcus Metzler <mocm@metzlerbros.de>
+ * Copyright (C) 2003 - 2006
+ *                    Marcus Metzler <mocm@metzlerbros.de>
  *                    Metzler Brothers Systementwicklung GbR
  *
  * This program is free software; you can redistribute it and/or
@@ -62,7 +63,7 @@ uint32_t getsize(int fd)
 	return getle32(buf);
 }
 
-uint32_t getsize_buf(int8_t *buf)
+uint32_t getsize_buf(uint8_t *buf)
 {
 	return getle32(buf);
 }
