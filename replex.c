@@ -1750,29 +1750,34 @@ int replex_fill_buffers(struct replex *rx, uint8_t *mbuf)
 	switch(rx->itype){
 	case REPLEX_TS:
 		if (fill < IN_SIZE){
-			rsize = fill - (fill%188);
+			rsize = fill - (fill%TS_SIZE);
 		} else rsize = IN_SIZE;
 		
-//	fprintf(stderr,"filling with %d\n",rsize);
+	//fprintf(stderr,"filling with %d\n",rsize);
 		
 		if (!rsize) return 0;
 		
 		memset(buf, 0, IN_SIZE);
 		
 		if ( mbuf ){
-			for ( i = 0; i < 188 ; i++){
-				if ( mbuf[i] == 0x47 ) break;
+			for ( i = 0; i < (NUM_HEADER-1)*TS_SIZE ; i++){
+                // require at least two pakets like in check_stream_type() 
+                // (maybe that function should return the correct position so we don't have to check for it again?)
+				if ( mbuf[i] == 0x47 && mbuf[i+TS_SIZE] == 0x47) break;
 			}
 			
-			if ( i == 188){
+			if ( i == (NUM_HEADER-1)*TS_SIZE){
 				fprintf(stderr,"Not a TS\n");
 				return -1;
 			} else {
-				memcpy(buf,mbuf+i,2*TS_SIZE-i);
+                //printf("Found valid begin of TS paket sequence at %d\n",i); 
+				memcpy(buf,mbuf+i,NUM_HEADER*TS_SIZE-i);
 				if ((count = save_read(rx,mbuf,i))<0)
 					perror("reading");
-				memcpy(buf+2*TS_SIZE-i,mbuf,i);
-				i = 188;
+				memcpy(buf+NUM_HEADER*TS_SIZE-i,mbuf,i);
+                // That was a BUG because in V0.1.6.8 since 2*TS_SIZE has been read/copied originally!!! 
+                // Should have been be i=376 instead of i=188... otherwise the second 188 (@buf+i) will be overwritten below... 
+				i = NUM_HEADER*TS_SIZE;
 			}
 		} else i=0;
 
@@ -1912,13 +1917,14 @@ int check_stream_type(struct replex *rx, uint8_t * buf, int len)
 		exit(1);
 	}
 
+    // there may be a single corrupted paket at the beginning of the stream due to cutting on the PVR...
+    // or just by coincidence an ASCII 0x47 in proprietary header data!!!
+    // ==> better look for AT LEAST 2 valid pakets in a row to get in sync...
 	fprintf(stderr, "Checking for TS: ");
-	while (c < len && buf[c]!=0x47) c++;
-	if (c<len && len-c>=TS_SIZE){
-		if (buf[c+TS_SIZE] == 0x47){
-			fprintf(stderr,"confirmed\n");
-			return REPLEX_TS;
-		} else  fprintf(stderr,"failed\n");
+	while (c < len-TS_SIZE && ( buf[c]!=0x47 || buf[c+TS_SIZE]!=0x47 )) c++;
+	if (c < len-TS_SIZE){
+		fprintf(stderr,"confirmed\n");
+		return REPLEX_TS;
 	} else  fprintf(stderr,"failed\n");
 
 	fprintf(stderr, "Checking for AVI: ");
@@ -1951,7 +1957,8 @@ int check_stream_type(struct replex *rx, uint8_t * buf, int len)
 void init_replex(struct replex *rx,int bufsize)
 {
 	int i;
-	uint8_t mbuf[2*TS_SIZE];
+	//uint8_t mbuf[2*TS_SIZE];
+	uint8_t mbuf[NUM_HEADER*TS_SIZE];
 	
 	int VIDEO_BUF, AUDIO_BUF, AC3_BUF;
 
@@ -1961,10 +1968,12 @@ void init_replex(struct replex *rx,int bufsize)
 
 	rx->analyze=0;
 
-	if (save_read(rx, mbuf, 2*TS_SIZE)<0)
+	//if (save_read(rx, mbuf, 2*TS_SIZE)<0)
+	if (save_read(rx, mbuf, NUM_HEADER*TS_SIZE)<0)
 		perror("reading");
 	
-	check_stream_type(rx, mbuf, 2*TS_SIZE);
+	//check_stream_type(rx, mbuf, 2*TS_SIZE);
+	check_stream_type(rx, mbuf, NUM_HEADER*TS_SIZE);
 	if (rx->itype == REPLEX_TS){
 		if (!rx->vpid || !(rx->apidn || rx->ac3n)){
 			if (rx->inflength){
@@ -2321,16 +2330,19 @@ void do_analyze(struct replex *rx)
 
 void do_scan(struct replex *rx)
 {
-	uint8_t mbuf[2*TS_SIZE];
+	//uint8_t mbuf[2*TS_SIZE];
+	uint8_t mbuf[NUM_HEADER*TS_SIZE];
 	
 	rx->analyze=0;
 
-	if (save_read(rx, mbuf, 2*TS_SIZE)<0)
+	//if (save_read(rx, mbuf, 2*TS_SIZE)<0)
+	if (save_read(rx, mbuf, NUM_HEADER*TS_SIZE)<0)
 		perror("reading");
 	
 	fprintf(stderr,"STARTING SCAN\n");
 	
-	check_stream_type(rx, mbuf, 2*TS_SIZE);
+	//check_stream_type(rx, mbuf, 2*TS_SIZE);
+	check_stream_type(rx, mbuf, NUM_HEADER*TS_SIZE);
 
 	switch(rx->itype){
 	case REPLEX_TS:

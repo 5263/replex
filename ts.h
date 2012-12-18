@@ -28,6 +28,14 @@
 #ifndef _TS_H_
 #define _TS_H_
 
+/*
+  number of possible proprietary header pakets to skip at begin of a TS 
+  (for instance... Topfield receivers write up to 20 pakets with private data,
+   and if the transport stream was cutted on the receiver it could start with 
+   after the header with corrupted pakets... therefore leave some room to check!) 
+*/   
+#define NUM_HEADER 30
+
 #define TS_SIZE        188
 #define TRANS_ERROR    0x80
 #define PAY_START      0x40
